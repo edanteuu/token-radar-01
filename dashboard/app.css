@@ -41,6 +41,11 @@ button{cursor:pointer}
 .kpi b{font-family:var(--mono);font-size:19px;font-weight:600}
 .kpi small{display:block;color:var(--muted);font-size:11px}
 
+/* integrity strip */
+.strip{display:flex;flex-wrap:wrap;gap:var(--s2) var(--s5);padding:var(--s3) var(--s4);margin-bottom:var(--s4);background:var(--surface);border:1px solid var(--border);border-radius:var(--r);font-size:12px;color:var(--muted)}
+.strip b{color:var(--ink);font-family:var(--mono);font-weight:500}
+.strip span{margin-right:var(--s2)}
+
 /* tabs */
 .tabs{display:flex;gap:var(--s1);padding:3px;border:1px solid var(--border);border-radius:var(--r);background:var(--surface);width:max-content;max-width:100%;flex-wrap:wrap}
 .tabs button{min-height:32px;padding:0 var(--s4);border:0;border-radius:6px;background:transparent;color:var(--muted);font-weight:600}

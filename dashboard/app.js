@@ -34,6 +34,15 @@
     return Math.max(0, Math.round(d)) + 'd';
   }
   function fmtMult(n) { return has(n) && isFinite(n) ? '×' + n.toFixed(2) : '—'; }
+  function fmtRange(iv) {
+    if (!Array.isArray(iv) || iv.length !== 2) return '—';
+    return fmtUsd(iv[0]) + ' – ' + fmtUsd(iv[1]);
+  }
+  function fmtMembers(r) {
+    var m = arr(r.launch_members_usd);
+    if (m.length !== 3) return '—';
+    return 'base ' + fmtUsd(m[0]) + ' · growth ' + fmtUsd(m[1]) + ' · maturity ' + fmtUsd(m[2]);
+  }
   function fmtOdds(o) {
     if (!has(o) || !isFinite(o)) return '—';
     if (o >= 0 && o <= 1) return Math.round(o * 100) + '%';
@@ -51,29 +60,29 @@
     return '<span class="badge ' + cls + '">' + esc(v || '—') + '</span>';
   }
 
-  // sandbox: re-weight the stored model, defaults reproduce the stored board ----
-  // launch_value already carries the fitted growth (weight 0.5) and maturity factors, so the
-  // sandbox swaps the growth factor for one at the user's weight, scales the launch value, and
-  // optionally drops odds. At base 1, growth weight 0.5, odds on, sbx == stored implied value.
+  // sandbox: re-weight the stored ensemble, defaults reproduce the stored board ----
+  // launch_members_usd holds [base, growth, maturity]; the stored launch is their
+  // log-average. The sandbox re-weights the members (0 drops one, 2 doubles its voice),
+  // scales by a base multiple, and optionally drops odds.
   var comps = (D && D.model && D.model.comps) || {};
-  var DEF_BASE = 1;
-  var DEF_GROWTH = 0.5;
+  var DEF_BASE = 1, DEF_GROWTH = 1, DEF_MATURITY = 1;
   var state = {
     tab: 'board', q: '', category: 'all', chain: 'all', watchOnly: false, minTvl: '',
     sort: 'implied', dir: -1, selected: null,
-    sbx: { base: DEF_BASE, growth: DEF_GROWTH, odds: true }
+    sbx: { base: DEF_BASE, growth: DEF_GROWTH, maturity: DEF_MATURITY, odds: true }
   };
   function sbxActive() {
-    return state.sbx.base !== DEF_BASE || state.sbx.growth !== DEF_GROWTH || !state.sbx.odds;
+    return state.sbx.base !== DEF_BASE || state.sbx.growth !== DEF_GROWTH || state.sbx.maturity !== DEF_MATURITY || !state.sbx.odds;
   }
   function sbxImplied(r) {
-    var launch = num(r.launch_value_usd, null);
-    if (launch === null) return num(r.implied_value_usd, null);
-    var chg = Math.max(-60, Math.min(120, num(r.change_7d, 0)));
-    var oldGM = num(r.growth_multiplier, 1) || 1;
-    var newGM = 1 + state.sbx.growth * chg / 100;
+    var mem = arr(r.launch_members_usd);
+    if (mem.length !== 3) return num(r.implied_value_usd, null);
+    var w = [1, num(state.sbx.growth, 1), num(state.sbx.maturity, 1)];
+    var sum = w[0] + w[1] + w[2];
+    var log = 0;
+    for (var i = 0; i < 3; i++) log += (w[i] / sum) * Math.log10(Math.max(1, num(mem[i], 1)));
     var odds = state.sbx.odds ? num(r.odds, 1) : 1;
-    return Math.max(1, Math.round(launch * (newGM / oldGM) * state.sbx.base * odds));
+    return Math.max(1, Math.round(Math.pow(10, log) * state.sbx.base * odds));
   }
   function effImplied(r) { return sbxActive() ? sbxImplied(r) : num(r.implied_value_usd, null); }
 
@@ -138,10 +147,24 @@
       ['Live-token protocols', String(num(c.live, arr(D.live).length)), 'set aside, market caps shown'],
       ['Excluded', String(num(c.excluded, arr(D.excluded).length)), 'protocols not ranked'],
       ['Comps pool', String(num(comps.n, 0)), 'live tokens fitted'],
-      ['Median mcap / TVL', has(comps.median_ratio) ? '×' + comps.median_ratio.toFixed(2) : '—', 'fitted comps ratio']
+      ['Honest 80% range', has(D.conformal) && has(D.conformal.factor80) ? '×' + D.conformal.factor80 : '—', 'jackknife+ interval factor']
     ];
     return '<section class="kpis" aria-label="Snapshot summary">' + kpis.map(function (k) {
       return '<div class="kpi"><span>' + k[0] + '</span><b>' + esc(k[1]) + '</b><small>' + k[2] + '</small></div>';
+    }).join('') + '</section>';
+  }
+  function integrityHtml() {
+    var ig = D.integrity || {};
+    var items = [
+      ['Snapshot', esc(D.as_of || '—') + ' · frozen DefiLlama fetch'],
+      ['No 7d change reported', String(num(ig.missing_change_7d, 0)) + ' of ' + num(ig.total, arr(D.rows).length) + ' rows'],
+      ['Listing date unknown', String(num(ig.unknown_age, 0)) + ' rows'],
+      ['Single chain', String(num(ig.single_chain, 0)) + ' rows'],
+      ['Below watchlist floor', String(num(ig.below_floor, 0)) + ' rows'],
+      ['Watchlist', String(num(ig.watchlist, 0)) + ' / ' + num(D.watchlist_size, 0)]
+    ];
+    return '<section class="strip" aria-label="Integrity strip">' + items.map(function (k) {
+      return '<div><span>' + k[0] + '</span><b>' + k[1] + '</b></div>';
     }).join('') + '</section>';
   }
   function tabsHtml() {
@@ -163,13 +186,15 @@
       '<h3>Model sandbox — recompute the board live</h3>' +
       '<div class="field"><label for="sbx-base">Base multiple</label>' +
       '<input id="sbx-base" type="number" step="0.05" min="0" data-sbx="base" value="' + state.sbx.base + '"></div>' +
-      '<div class="field"><label for="sbx-growth">Growth weight</label>' +
-      '<input id="sbx-growth" type="number" step="0.05" data-sbx="growth" value="' + state.sbx.growth + '"></div>' +
+      '<div class="field"><label for="sbx-growth">Growth member weight</label>' +
+      '<input id="sbx-growth" type="number" step="0.25" min="0" max="2" data-sbx="growth" value="' + state.sbx.growth + '"></div>' +
+      '<div class="field"><label for="sbx-maturity">Maturity member weight</label>' +
+      '<input id="sbx-maturity" type="number" step="0.25" min="0" max="2" data-sbx="maturity" value="' + state.sbx.maturity + '"></div>' +
       '<label class="check"><input type="checkbox" data-sbx="odds"' + (state.sbx.odds ? ' checked' : '') + '> Apply odds</label>' +
       '<button type="button" class="btn" data-action="sbx-reset">Reset</button>' +
-      '<p class="note">implied = launch value × (new growth factor ÷ stored growth factor) × base multiple × odds' +
-      (on ? ' — <b>sandbox values active, board re-ranked</b>' : ' — defaults reproduce the stored board (base ×1.00, growth weight 0.50, odds on)') +
-      '. The stored ranking returns on reset.</p></section>';
+      '<p class="note">implied = 10^(weighted log-average of the three member launch values) × base multiple × odds' +
+      (on ? ' — <b>sandbox values active, board re-ranked</b>' : ' — defaults reproduce the stored board (equal member weights, base ×1.00, odds on)') +
+      '. Set a member weight to 0 to drop it and see how the board moves. The stored ranking returns on reset.</p></section>';
   }
 
   // ---- views ----
@@ -283,35 +308,67 @@
   }
   function modelHtml() {
     var v = D.validation || {};
-    var wf = v.walk_forward || {}, loo = v.loo || {};
-    function valTable(t, title) {
-      return '<div><h3>' + title + '</h3><table><thead><tr><th scope="col">Check</th><th scope="col">Model</th><th scope="col">Flat baseline</th></tr></thead><tbody>' +
-        '<tr><td>Protocols</td><td class="num">' + (has(t.n) ? esc(t.n) : (has(t.n_test) ? esc(t.n_train) + ' train / ' + esc(t.n_test) + ' test' : '—')) + '</td><td class="num">same set</td></tr>' +
-        '<tr><td>Median |log error|</td><td class="num">' + (has(t.median_abs_log_err) ? t.median_abs_log_err.toFixed(2) : '—') + '</td><td class="num">—</td></tr>' +
-        '<tr><td>Within 3× of actual</td><td class="num">' + (has(t.within_3x) ? Math.round(t.within_3x * 100) + '%' : '—') + '</td><td class="num">' + (has(t.baseline_within_3x) ? Math.round(t.baseline_within_3x * 100) + '%' : '—') + '</td></tr>' +
-        '</tbody></table></div>';
-    }
+    var specs = arr(v.specs);
+    var fin = null;
+    specs.forEach(function (s) { if (s.spec === 'ensemble') fin = s; });
     var floor = has(D.floor_usd) ? fmtUsd(D.floor_usd) : '—';
+    var cf = D.conformal || {};
+    var od = D.odds || {};
+    function num2(x) { return has(x) && isFinite(x) ? x.toFixed(2) : '—'; }
+    function pct(x) { return has(x) && isFinite(x) ? Math.round(x * 100) + '%' : '—'; }
+    function valRows() {
+      if (!fin) return '<p class="sub">No validation recorded.</p>';
+      return fin.tests.map(function (t) {
+        var n = has(t.n) ? String(t.n) : (has(t.n_train) ? t.n_train + ' train / ' + t.n_test + ' test' : '—');
+        return '<tr><td>' + esc(t.test) + '</td><td class="num">' + n + '</td>' +
+          '<td class="num">' + num2(t.median_abs_log_err) + '</td><td class="num">' + num2(t.baseline_median_abs_log_err) + '</td>' +
+          '<td class="num">×' + num2(t.multiplier) + '</td>' +
+          '<td class="num">' + pct(t.within_3x) + '</td>' +
+          '<td class="num">' + pct(t.baseline_within_3x) + '</td></tr>';
+      }).join('');
+    }
+    function keepRows() {
+      return specs.map(function (s) {
+        return '<tr><td>' + esc(s.label || s.spec) + '</td><td class="num">' + num2(s.mean_median_abs_log_err) + '</td>' +
+          '<td class="num">' + pct(s.mean_within_3x) + '</td>' +
+          '<td><b>' + esc(s.verdict || '—') + '</b></td><td>' + esc(s.rationale || '') + '</td></tr>';
+      }).join('');
+    }
+    function bandRows(bands) {
+      return arr(bands).map(function (b) {
+        return '<tr><td>' + esc(b.label) + '</td><td class="num">' + num(b.n, 0) + '</td><td class="num">' + pct(b.token_share) + '</td></tr>';
+      }).join('');
+    }
+    var ageBands = arr(od.age_bands);
+    var ageNote = ageBands.length >= 2
+      ? ' Age is where the signal lives: the youngest band records a token ' + pct(ageBands[0].token_share) + ' of the time, the oldest ' + pct(ageBands[ageBands.length - 1].token_share) + '.'
+      : '';
     return '<section class="panel pad model"><div><h2>How implied value is computed</h2>' +
-      '<p class="sub">One fitted function scores every row. No protocol name is special-cased and no row is hand-picked.</p></div>' +
-      '<div><h3>Fitted comps formula</h3>' +
-      '<div class="formula">log(market cap) = <b>' + (has(comps.a) ? comps.a : '—') + '</b> + <b>' +
-      (has(comps.b) ? comps.b : '—') + '</b> × log(TVL)<br>' +
-      'fitted on <b>' + num(comps.n, 0) + '</b> live-token comps · median mcap / TVL = <b>×' +
-      (has(comps.median_ratio) ? comps.median_ratio.toFixed(2) : '—') + '</b></div>' +
-      '<div class="kv" style="margin-top:var(--s3)">' +
-      '<div><span>Intercept (a)</span><b>' + (has(comps.a) ? comps.a : '—') + '</b></div>' +
-      '<div><span>Slope (b)</span><b>' + (has(comps.b) ? comps.b : '—') + '</b></div>' +
-      '<div><span>Comps fitted (n)</span><b>' + num(comps.n, 0) + '</b></div>' +
-      '<div><span>Median mcap / TVL</span><b>' + (has(comps.median_ratio) ? '×' + comps.median_ratio.toFixed(2) : '—') + '</b></div>' +
-      '</div></div>' +
-      '<div><h3>Held-out validation vs the flat baseline</h3>' +
-      '<p class="sub" style="margin-bottom:var(--s3)">The flat baseline predicts every token at the median mcap/TVL. The model must beat it out of sample, not just in sample.</p>' +
-      valTable(wf, 'Walk-forward') + '<div style="height:var(--s4)"></div>' + valTable(loo, 'Leave-one-out') + '</div>' +
+      '<p class="sub">An equal-weight ensemble of three fitted predictors, log-averaged. No protocol name is special-cased and no row is hand-picked.</p></div>' +
+      '<div><h3>Fitted ensemble</h3>' +
+      '<div class="formula">M0 base: log(market cap) = <b>' + num2(comps.a) + '</b> + <b>' + num2(comps.b) + '</b> × log(TVL)<br>' +
+      'M1 growth: log(market cap) = <b>' + num2(comps.growth_a) + '</b> + <b>' + num2(comps.growth_b) + '</b> × log(TVL) <b>' + num2(comps.growth_c) + '</b> × g<br>' +
+      'M2 maturity: M0 × (0.6 + 0.4 × min(age, 1095) / 1095)<br>' +
+      'launch = 10^mean(log M0, log M1, log M2) · implied = launch × odds<br>' +
+      'g = 7-day TVL change clamped to ±30%, as a fraction · fitted on <b>' + num(comps.n, 0) + '</b> live-token comps · median mcap / TVL = <b>×' + num2(comps.median_ratio) + '</b></div>' +
+      '<p class="sub" style="margin-top:var(--s3)">The fitted growth coefficient is negative: among live comps, a recent TVL spike predicts a lower market-cap/TVL ratio — growth spikes mean-revert. The ±30% clamp keeps one wild week from moving a prediction by more than ~0.45 log units.</p></div>' +
+      '<div><h3>Five blind tests — final ensemble vs the flat 0.25 × TVL baseline</h3>' +
+      '<p class="sub" style="margin-bottom:var(--s3)">Median |log error| and share within 3× of the actual market cap. The multiplier is the baseline median error divided by the model’s: how many times smaller its typical error is.</p>' +
+      '<div class="table-wrap"><table><thead><tr><th scope="col">Blind test</th><th scope="col">Protocols</th><th scope="col">Model median err</th><th scope="col">Baseline median err</th><th scope="col">Multiplier</th><th scope="col">Model within 3×</th><th scope="col">Baseline within 3×</th></tr></thead><tbody>' + valRows() + '</tbody></table></div></div>' +
+      '<div><h3>Every value term: kept or dropped on the five blind tests</h3>' +
+      '<div class="table-wrap"><table><thead><tr><th scope="col">Candidate</th><th scope="col">Mean median err</th><th scope="col">Mean within 3×</th><th scope="col">Verdict</th><th scope="col">Why</th></tr></thead><tbody>' + keepRows() + '</tbody></table></div></div>' +
+      '<div><h3>Range honesty — jackknife+ intervals</h3>' +
+      '<p>Leave-one-out residuals of the final ensemble on <b class="num">' + num(cf.n, 0) + '</b> comps give the 80% interval factor <b class="num">×' + num2(cf.factor80) + '</b> (empirical coverage ' + pct(cf.coverage80) + ') and the 90% factor <b class="num">×' + num2(cf.factor90) + '</b> (coverage ' + pct(cf.coverage90) + '). Every row carries both intervals: the point estimate ranks, the interval humbles. A fitted curve on 128 comps cannot pin a launch value tighter than that, and this board does not pretend otherwise.</p></div>' +
+      '<div><h3>Launch odds from the peers’ record</h3>' +
+      '<p>Odds are the shrunk average of the protocol’s age-band and TVL-band token shares. Brier score <b class="num">' + num2(od.brier) + '</b> vs <b class="num">' + num2(od.brier_constant) + '</b> for the constant overall rate (' + pct(od.overall) + ' of protocols record a token) — lower is better, and the banded odds beat the constant.' + ageNote + '</p>' +
+      '<div class="table-wrap" style="margin-top:var(--s3)"><table><thead><tr><th scope="col">Age band</th><th scope="col">Protocols</th><th scope="col">Record a token</th></tr></thead><tbody>' + bandRows(od.age_bands) + '</tbody></table></div>' +
+      '<div class="table-wrap" style="margin-top:var(--s3)"><table><thead><tr><th scope="col">TVL band</th><th scope="col">Protocols</th><th scope="col">Record a token</th></tr></thead><tbody>' + bandRows(od.tvl_bands) + '</tbody></table></div></div>' +
+      '<div><h3>Farm economics — costed, sized to minimum viable capital</h3>' +
+      '<p>Gas is priced by the protocol’s main chain (stated planning assumptions, not measured fees: Ethereum $8 a transaction; Solana, Base, Arbitrum, Optimism, BNB Chain, Polygon, Avalanche, Sui and Aptos $2; everything else $3). A plan makes 5 + hold-weeks transactions. Minimum viable capital is the deposit plus the whole gas bill. Expected value is the implied value × 0.01% (a stated assumption); net per hour is (expected value − gas) / active hours; break-even is the implied value at which the farm pays for its gas. FARM at ≥ $100/hour, THIN at ≥ $25/hour, otherwise SKIP.</p></div>' +
       '<div><h3>Watchlist rule</h3><p>The watchlist is every protocol with at least <b class="num">' + floor + '</b> of TVL that records no token. ' +
       'Protocols below the floor, or with a token on record, are not ranked; they appear in the live and excluded lanes instead.</p></div>' +
       '<div class="note"><b>Honesty note.</b> A protocol on this board <b>records no token</b> — never “has none”. ' +
-      'Absence from the token lists is a record state, not a promise that no token exists. Implied value is a model estimate, not a price.</div>' +
+      'Absence from the token lists is a record state, not a promise that no token exists. Implied value is a model estimate, not a price, and the 80% range on every row says how wide that estimate honestly is.</div>' +
       '</section>';
   }
 
@@ -350,14 +407,21 @@
       '<div><span>Odds of a token</span><b>' + fmtOdds(r.odds) + '</b></div>' +
       '<div><span>Growth multiplier</span><b>' + fmtMult(r.growth_multiplier) + '</b></div>' +
       '<div><span>Maturity multiplier</span><b>' + fmtMult(r.maturity_multiplier) + '</b></div>' +
-      '<div><span>Implied value</span><b>' + fmtUsd(r.implied_value_usd) + '</b></div>' + sbxRow +
+      '<div><span>Member launch values</span><b>' + fmtMembers(r) + '</b></div>' +
+      '<div><span>Implied value</span><b>' + fmtUsd(r.implied_value_usd) + '</b></div>' +
+      '<div><span>80% range (jackknife+)</span><b>' + fmtRange(r.interval_80_usd) + '</b></div>' +
+      '<div><span>90% range (jackknife+)</span><b>' + fmtRange(r.interval_90_usd) + '</b></div>' + sbxRow +
       '</div><p class="sub" style="margin-top:var(--s3)">Model ' + esc(D.model_version || '—') + ': the same function scores every protocol. This is an estimate, not a price.</p></section>' +
       '<section class="detail-section"><h3>Farm plan</h3>' + stepsHtml + '</section>' +
       '<section class="detail-section"><h3>Farm economics</h3><div class="econ">' +
-      '<div><span>Farm cost</span><b>' + fmtUsd(r.farm_cost_usd) + '</b></div>' +
+      '<div><span>Farm cost (gas)</span><b>' + fmtUsd(r.farm_cost_usd) + '</b></div>' +
       '<div><span>Farm time</span><b>' + (has(r.farm_hours) ? r.farm_hours + ' h' : '—') + '</b></div>' +
+      '<div><span>Min viable capital</span><b>' + fmtUsd(r.min_capital_usd) + '</b></div>' +
+      '<div><span>Break-even implied value</span><b>' + fmtUsd(r.breakeven_implied_usd) + '</b></div>' +
       '<div><span>Net per hour</span><b>' + fmtUsd(r.net_per_hour_usd) + '</b></div>' +
-      '<div><span>Verdict</span><b>' + esc(r.verdict || '—') + '</b></div></div>' +
+      '<div><span>Net per $100 capital</span><b>' + fmtUsd(r.net_per_100_capital_usd) + '</b></div>' +
+      '<div><span>Verdict</span><b>' + esc(r.verdict || '—') + '</b></div>' +
+      '<div><span>Integrity flags</span><b>' + (arr(r.integrity_flags).length ? esc(arr(r.integrity_flags).join('; ')) : 'none') + '</b></div></div>' +
       '<p class="verdict">Verdict: <b>' + esc(r.verdict || '—') + '</b></p></section>';
     if (typeof dialog.showModal === 'function') {
       if (!dialog.open) dialog.showModal();
@@ -366,7 +430,7 @@
 
   // ---- render ----
   function renderShell() {
-    app.innerHTML = '<div class="shell">' + headerHtml() + kpiHtml() + tabsHtml() + sandboxHtml() +
+    app.innerHTML = '<div class="shell">' + headerHtml() + kpiHtml() + integrityHtml() + tabsHtml() + sandboxHtml() +
       '<div id="view" style="margin-top:var(--s4)"></div></div>';
     if (!dialog.isConnected) document.body.appendChild(dialog);
     renderView();
@@ -408,7 +472,7 @@
         state.q = ''; state.category = 'all'; state.chain = 'all'; state.watchOnly = false; state.minTvl = '';
         renderShell();
       } else if (a === 'sbx-reset') {
-        state.sbx = { base: DEF_BASE, growth: DEF_GROWTH, odds: true };
+        state.sbx = { base: DEF_BASE, growth: DEF_GROWTH, maturity: DEF_MATURITY, odds: true };
         renderShell();
       }
       return;
@@ -456,6 +520,26 @@
     app.setAttribute('aria-busy', 'false');
     return;
   }
-  renderShell();
+  // Deep links: #tab=board|live|excluded|model, #detail=<slug>, #q=<text>,
+  // #category=<name>, #chain=<name>, #watch=1, #min-tvl=<usd>. A detail link opens
+  // the protocol's detail view once the board has rendered.
+  (function deepLink() {
+    var h = String(window.location.hash || '').replace(/^#/, '');
+    if (!h) return;
+    var params = {};
+    h.split('&').forEach(function (part) {
+      var kv = part.split('=');
+      if (kv[0]) params[kv[0]] = decodeURIComponent(kv[1] || '');
+    });
+    if (params.tab && ['board', 'live', 'excluded', 'model'].indexOf(params.tab) >= 0) state.tab = params.tab;
+    if (params.q) state.q = params.q;
+    if (params.category) state.category = params.category;
+    if (params.chain) state.chain = params.chain;
+    if (params.watch === '1') state.watchOnly = true;
+    if (params['min-tvl']) state.minTvl = params['min-tvl'];
+    renderShell();
+    if (params.detail) openDetail(params.detail);
+  })();
+  if (!window.location.hash) renderShell();
   app.setAttribute('aria-busy', 'false');
 })();
